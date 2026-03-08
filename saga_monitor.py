@@ -134,11 +134,22 @@ def get_wohnungen(session: requests.Session) -> dict:
     if "Sicherheitsprüfung" in html and "0 Ergebnisse" in html:
         raise ValueError("Sicherheitspruefung aktiv")
 
+    # Debug: zeige alle div-Klassen die im HTML vorkommen
     soup = BeautifulSoup(html, "html.parser")
+    all_classes = set()
+    for div in soup.find_all("div", limit=200):
+        for c in div.get("class", []):
+            if "immo" in c.lower() or "card" in c.lower() or "apart" in c.lower() or "list" in c.lower() or "item" in c.lower():
+                all_classes.add(c)
+    log.info(f"Relevante div-Klassen: {sorted(all_classes)}")
+
+    # Zeige auch alle div-IDs mit immo/card/apart
+    all_ids = [div.get("id") for div in soup.find_all("div") if div.get("id") and any(x in div.get("id","").lower() for x in ["immo","card","apart","wohn"])]
+    log.info(f"Relevante div-IDs: {all_ids[:20]}")
+
     cards = [div for div in soup.find_all("div") if "immo-item" in div.get("class", [])]
 
     if len(cards) == 0:
-        # Debug: zeige was die Seite zurückgibt
         snippet = html[html.find("<main"):html.find("<main")+500] if "<main" in html else html[:500]
         log.warning(f"Keine Cards. HTML-Snippet: {snippet[:300]}")
         raise ValueError("Keine Wohnungs-Cards gefunden")
