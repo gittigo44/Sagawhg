@@ -4,14 +4,13 @@ SAGA Wohnungs-Monitor
 Überwacht https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT
 alle 5 Minuten und sendet eine Telegram-Nachricht bei neuen Wohnungen.
 
-Funktioniert mit Session-Management um den Anti-Bot-Check zu umgehen.
-
 Token & Chat-ID als Umgebungsvariablen in Railway hinterlegen:
   TELEGRAM_TOKEN
   TELEGRAM_CHAT_ID
 """
 
 import os
+import re
 import time
 import logging
 import requests
@@ -48,87 +47,91 @@ log = logging.getLogger(__name__)
 
 
 def make_session() -> requests.Session:
-    """
-    Erstellt eine neue Session mit PHPSESSID.
-    Besucht die Seite zuerst ohne Parameter um einen gültigen Cookie zu bekommen,
-    wartet kurz (wie ein echter Browser) und ruft dann die Wohnungsseite ab.
-    """
+    """Baut eine echte Browser-Session auf (Homepage zuerst besuchen)."""
     session = requests.Session()
     session.headers.update(HEADERS)
-
-    # Erster Besuch — Session/Cookie aufbauen
     try:
         session.get("https://www.saga.hamburg/", timeout=15)
-        time.sleep(2)  # kurze Pause wie echter Nutzer
+        time.sleep(2)
     except Exception:
         pass
-
     return session
 
 
+def parse_card(card_html: str, card_id: str) -> dict:
+    """Extrahiert alle Details aus einem Wohnungs-Card HTML-Block."""
+    soup = BeautifulSoup(card_html, "html.parser")
+
+    # Titel aus h3
+    h3 = soup.find("h3")
+    titel = h3.get_text(strip=True) if h3 else ""
+
+    # Link
+    link = soup.find("a", href=lambda h: h and "immo-detail" in h)
+    href = link["href"] if link else ""
+    objekt_id = href.split("/immo-detail/")[1].split("/")[0] if "/immo-detail/" in href else card_id
+
+    # Adresse aus pb-3 p-Tag
+    adresse_tag = soup.find("p", class_=lambda c: c and "pb-3" in c)
+    adresse = adresse_tag.get_text(strip=True) if adresse_tag else ""
+
+    # Zimmer, Größe, Miete, Datum via Regex auf rohem HTML
+    # (nötig weil BS4 camelCase-Attribute lowercased)
+    zimmer = re.search(r'data-rooms="([^"]+)"', card_html)
+    groesse = re.search(r'data-livingSpace="([^"]+)"', card_html)
+    miete = re.search(r'data-fullCosts="([^"]+)"', card_html)
+    avail = re.search(r'data-availableAt="(\d{4}-\d{2}-\d{2})', card_html)
+
+    zimmer_str  = zimmer.group(1)  if zimmer  else ""
+    groesse_str = groesse.group(1) if groesse else ""
+    miete_str   = miete.group(1)   if miete   else ""
+
+    # Datum formatieren: 2026-03-01 → 01.03.2026
+    verfuegbar = ""
+    if avail:
+        try:
+            d = datetime.strptime(avail.group(1), "%Y-%m-%d")
+            verfuegbar = d.strftime("%d.%m.%Y")
+        except Exception:
+            verfuegbar = avail.group(1)
+
+    return {
+        "objekt_id":  objekt_id,
+        "titel":      titel,
+        "adresse":    adresse,
+        "zimmer":     zimmer_str,
+        "groesse":    groesse_str,
+        "miete":      miete_str,
+        "verfuegbar": verfuegbar,
+        "url":        f"https://www.saga.hamburg{href}",
+    }
+
+
 def get_wohnungen(session: requests.Session) -> dict:
-    """
-    Lädt die Seite und gibt ein Dict zurück:
-      { objekt_id: { titel, adresse, miete, verfuegbar, url } }
-    """
+    """Lädt die Seite und gibt alle Wohnungen als Dict zurück."""
     response = session.get(URL, timeout=15)
     response.raise_for_status()
+    html = response.text
 
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Prüfen ob Sicherheitscheck noch aktiv
-    if "Sicherheitsprüfung" in response.text and "0 Ergebnisse" in response.text:
+    # Sicherheitscheck noch aktiv?
+    if "Sicherheitsprüfung" in html and "0 Ergebnisse" in html:
         raise ValueError("Sicherheitspruefung aktiv – noch keine Daten")
 
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Alle Wohnungs-Cards finden: <div id="APARTMENT-card-X">
+    cards = soup.find_all("div", id=re.compile(r"^APARTMENT-card-\d+$"))
+
+    if len(cards) == 0:
+        raise ValueError("Keine Wohnungs-Cards gefunden – Seite evtl. blockiert")
+
     results = {}
-
-    # Alle Links zu Wohnungs-Detailseiten finden
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        # SAGA Wohnungs-Links haben das Muster /immobiliensuche/.../details/...
-        # oder enthalten eine eindeutige ID
-        if "/immobiliensuche" not in href:
-            continue
-        if "details" not in href and "apartment" not in href.lower():
-            continue
-
-        # ID aus URL extrahieren (letztes Segment)
-        objekt_id = href.rstrip("/").split("/")[-1]
-        if not objekt_id or objekt_id in results:
-            continue
-
-        # Text aus dem umgebenden Block
-        block = link.find_parent()
-        raw_lines = []
-        if block:
-            raw_lines = [
-                l.strip()
-                for l in block.get_text("\n", strip=True).splitlines()
-                if l.strip()
-            ]
-
-        titel      = raw_lines[0] if len(raw_lines) > 0 else "Wohnung"
-        adresse    = next((l for l in raw_lines if any(x in l for x in ["Hamburg", "Str.", "straße", "weg", "Weg", "Ring", "Allee"])), "")
-        miete      = next((l for l in raw_lines if "EUR" in l or "€" in l), "")
-        verfuegbar = next((l for l in raw_lines if "frei" in l.lower() or "ab" in l.lower()), "")
-
-        full_url = f"https://www.saga.hamburg{href}" if href.startswith("/") else href
-
-        results[objekt_id] = {
-            "titel":      titel,
-            "adresse":    adresse,
-            "miete":      miete,
-            "verfuegbar": verfuegbar,
-            "url":        full_url,
-        }
-
-    # Fallback: Anzahl Ergebnisse aus HTML lesen als Sanity-Check
-    ergebnisse_text = soup.find(string=lambda t: t and "Ergebnisse" in t)
-    if ergebnisse_text and "0 Ergebnisse" in ergebnisse_text:
-        raise ValueError("Seite zeigt 0 Ergebnisse – moeglicherweise blockiert")
-
-    if len(results) == 0:
-        raise ValueError("Keine Wohnungen gefunden – HTML-Struktur evtl. geaendert oder blockiert")
+    for card in cards:
+        card_html = str(card)
+        card_id = card.get("id", "")
+        info = parse_card(card_html, card_id)
+        objekt_id = info.pop("objekt_id")
+        results[objekt_id] = info
 
     return results
 
@@ -149,12 +152,16 @@ def send_telegram(message: str) -> None:
 
 
 def format_message(info: dict) -> str:
+    zimmer  = f"🛏 {info['zimmer']} Zimmer\n"   if info.get("zimmer")     else ""
+    groesse = f"📐 {info['groesse']} m²\n"       if info.get("groesse")    else ""
+    miete   = f"💶 {info['miete']} € Gesamtmiete\n" if info.get("miete")  else ""
+    verfueg = f"📅 Verfügbar ab: {info['verfuegbar']}\n" if info.get("verfuegbar") else ""
+
     return (
         f"🏠 <b>Neue SAGA Wohnung!</b>\n\n"
         f"📍 <b>{info['titel']}</b>\n"
         f"🏘 {info['adresse']}\n"
-        f"💶 {info['miete']}\n"
-        f"📅 {info['verfuegbar']}\n\n"
+        f"{zimmer}{groesse}{miete}{verfueg}\n"
         f"🔗 <a href='{info['url']}'>Zur Anzeige</a>"
     )
 
@@ -170,10 +177,9 @@ def main():
         f"Ich prüfe alle {CHECK_INTERVAL // 60} Minuten auf neue Wohnungen."
     )
 
-    # Session erstellen
     session = make_session()
 
-    # Ersten Stand einlesen
+    # Ersten Stand laden
     known = {}
     retries = 0
     while not known:
@@ -184,7 +190,6 @@ def main():
             retries += 1
             log.warning(f"Versuch {retries}: {e}")
             if retries % 5 == 0:
-                # Nach 5 Fehlversuchen neue Session aufbauen
                 log.info("Neue Session wird aufgebaut...")
                 session = make_session()
             time.sleep(60)
@@ -204,8 +209,7 @@ def main():
             consecutive_errors += 1
             log.warning(f"Abruf: {e}")
             if consecutive_errors >= 3:
-                # Nach 3 Fehlern neue Session aufbauen
-                log.info("Zu viele Fehler – neue Session wird aufgebaut...")
+                log.info("Neue Session wird aufgebaut...")
                 session = make_session()
                 consecutive_errors = 0
             continue
