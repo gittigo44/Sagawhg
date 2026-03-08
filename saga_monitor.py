@@ -22,21 +22,15 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 URL            = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
 CHECK_INTERVAL = 300  # 5 Minuten
-HEADERS        = {
-    "User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 OPR/127.0.0.0",
-    "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language":           "de,de-DE;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding":           "gzip, deflate, br",
-    "Referer":                   "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT",
-    "sec-ch-ua":                 '"Opera";v="127", "Chromium";v="143", "Not A(Brand";v="24"',
-    "sec-ch-ua-mobile":          "?0",
-    "sec-ch-ua-platform":        '"Windows"',
-    "sec-fetch-dest":            "document",
-    "sec-fetch-mode":            "navigate",
-    "sec-fetch-site":            "same-origin",
-    "upgrade-insecure-requests": "1",
-    "cache-control":             "max-age=0",
-}
+
+# Verschiedene User-Agent Strings zum Rotieren
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 OPR/127.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,16 +39,44 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+ua_index = 0
 
 def make_session() -> requests.Session:
-    """Baut eine echte Browser-Session auf (Homepage zuerst besuchen)."""
+    """Baut eine neue Session auf mit rotierendem User-Agent."""
+    global ua_index
     session = requests.Session()
-    session.headers.update(HEADERS)
+    ua = USER_AGENTS[ua_index % len(USER_AGENTS)]
+    ua_index += 1
+
+    session.headers.update({
+        "User-Agent":                ua,
+        "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language":           "de,de-DE;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding":           "gzip, deflate, br",
+        "sec-ch-ua-mobile":          "?0",
+        "sec-fetch-dest":            "document",
+        "sec-fetch-mode":            "navigate",
+        "sec-fetch-site":            "none",  # erster Besuch = kein Referrer
+        "upgrade-insecure-requests": "1",
+        "cache-control":             "no-cache",
+    })
+
+    # Erst Homepage besuchen (wie echter Nutzer)
     try:
-        session.get("https://www.saga.hamburg/", timeout=15)
+        r = session.get("https://www.saga.hamburg/", timeout=15)
+        log.info(f"Homepage: {r.status_code}, Cookies: {dict(session.cookies)}")
+        time.sleep(3)
+    except Exception as e:
+        log.warning(f"Homepage-Fehler: {e}")
+
+    # Dann Immobiliensuche-Startseite (ohne Filter)
+    try:
+        r = session.get("https://www.saga.hamburg/immobiliensuche", timeout=15)
+        log.info(f"Immobiliensuche: {r.status_code}, Cookies: {dict(session.cookies)}")
         time.sleep(2)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Immobiliensuche-Fehler: {e}")
+
     return session
 
 
@@ -62,31 +84,21 @@ def parse_card(card_html: str, card_id: str) -> dict:
     """Extrahiert alle Details aus einem Wohnungs-Card HTML-Block."""
     soup = BeautifulSoup(card_html, "html.parser")
 
-    # Titel aus h3
     h3 = soup.find("h3")
     titel = h3.get_text(strip=True) if h3 else ""
 
-    # Link
     link = soup.find("a", href=lambda h: h and "immo-detail" in h)
     href = link["href"] if link else ""
     objekt_id = href.split("/immo-detail/")[1].split("/")[0] if "/immo-detail/" in href else card_id
 
-    # Adresse aus pb-3 p-Tag
     adresse_tag = soup.find("p", class_=lambda c: c and "pb-3" in c)
     adresse = adresse_tag.get_text(strip=True) if adresse_tag else ""
 
-    # Zimmer, Größe, Miete, Datum via Regex auf rohem HTML
-    # (nötig weil BS4 camelCase-Attribute lowercased)
-    zimmer = re.search(r'data-rooms="([^"]+)"', card_html)
+    zimmer  = re.search(r'data-rooms="([^"]+)"', card_html)
     groesse = re.search(r'data-livingSpace="([^"]+)"', card_html)
-    miete = re.search(r'data-fullCosts="([^"]+)"', card_html)
-    avail = re.search(r'data-availableAt="(\d{4}-\d{2}-\d{2})', card_html)
+    miete   = re.search(r'data-fullCosts="([^"]+)"', card_html)
+    avail   = re.search(r'data-availableAt="(\d{4}-\d{2}-\d{2})', card_html)
 
-    zimmer_str  = zimmer.group(1)  if zimmer  else ""
-    groesse_str = groesse.group(1) if groesse else ""
-    miete_str   = miete.group(1)   if miete   else ""
-
-    # Datum formatieren: 2026-03-01 → 01.03.2026
     verfuegbar = ""
     if avail:
         try:
@@ -99,9 +111,9 @@ def parse_card(card_html: str, card_id: str) -> dict:
         "objekt_id":  objekt_id,
         "titel":      titel,
         "adresse":    adresse,
-        "zimmer":     zimmer_str,
-        "groesse":    groesse_str,
-        "miete":      miete_str,
+        "zimmer":     zimmer.group(1)  if zimmer  else "",
+        "groesse":    groesse.group(1) if groesse else "",
+        "miete":      miete.group(1)   if miete   else "",
         "verfuegbar": verfuegbar,
         "url":        f"https://www.saga.hamburg{href}",
     }
@@ -109,27 +121,33 @@ def parse_card(card_html: str, card_id: str) -> dict:
 
 def get_wohnungen(session: requests.Session) -> dict:
     """Lädt die Seite und gibt alle Wohnungen als Dict zurück."""
+    # Referer setzen (wie echter Browser der von der Übersichtsseite kommt)
+    session.headers.update({
+        "Referer":        "https://www.saga.hamburg/immobiliensuche",
+        "sec-fetch-site": "same-origin",
+    })
+
     response = session.get(URL, timeout=15)
     response.raise_for_status()
     html = response.text
 
-    # Sicherheitscheck noch aktiv?
+    log.info(f"Seite geladen: {response.status_code}, {len(html)} Zeichen")
+
     if "Sicherheitsprüfung" in html and "0 Ergebnisse" in html:
-        raise ValueError("Sicherheitspruefung aktiv – noch keine Daten")
+        raise ValueError("Sicherheitspruefung aktiv")
 
     soup = BeautifulSoup(html, "html.parser")
-
-    # Alle Wohnungs-Cards finden: <div id="APARTMENT-card-X">
     cards = soup.find_all("div", id=re.compile(r"^APARTMENT-card-\d+$"))
 
     if len(cards) == 0:
-        raise ValueError("Keine Wohnungs-Cards gefunden – Seite evtl. blockiert")
+        # Debug: zeige was die Seite zurückgibt
+        snippet = html[html.find("<main"):html.find("<main")+500] if "<main" in html else html[:500]
+        log.warning(f"Keine Cards. HTML-Snippet: {snippet[:300]}")
+        raise ValueError("Keine Wohnungs-Cards gefunden")
 
     results = {}
     for card in cards:
-        card_html = str(card)
-        card_id = card.get("id", "")
-        info = parse_card(card_html, card_id)
+        info = parse_card(str(card), card.get("id", ""))
         objekt_id = info.pop("objekt_id")
         results[objekt_id] = info
 
@@ -152,11 +170,10 @@ def send_telegram(message: str) -> None:
 
 
 def format_message(info: dict) -> str:
-    zimmer  = f"🛏 {info['zimmer']} Zimmer\n"   if info.get("zimmer")     else ""
-    groesse = f"📐 {info['groesse']} m²\n"       if info.get("groesse")    else ""
-    miete   = f"💶 {info['miete']} € Gesamtmiete\n" if info.get("miete")  else ""
+    zimmer  = f"🛏 {info['zimmer']} Zimmer\n"        if info.get("zimmer")     else ""
+    groesse = f"📐 {info['groesse']} m²\n"            if info.get("groesse")    else ""
+    miete   = f"💶 {info['miete']} € Gesamtmiete\n"  if info.get("miete")      else ""
     verfueg = f"📅 Verfügbar ab: {info['verfuegbar']}\n" if info.get("verfuegbar") else ""
-
     return (
         f"🏠 <b>Neue SAGA Wohnung!</b>\n\n"
         f"📍 <b>{info['titel']}</b>\n"
@@ -168,7 +185,7 @@ def format_message(info: dict) -> str:
 
 def main():
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        log.error("FEHLER: Umgebungsvariablen TELEGRAM_TOKEN und TELEGRAM_CHAT_ID fehlen!")
+        log.error("FEHLER: Umgebungsvariablen fehlen!")
         return
 
     log.info("SAGA Wohnungs-Monitor gestartet")
@@ -179,7 +196,6 @@ def main():
 
     session = make_session()
 
-    # Ersten Stand laden
     known = {}
     retries = 0
     while not known:
@@ -189,19 +205,17 @@ def main():
         except ValueError as e:
             retries += 1
             log.warning(f"Versuch {retries}: {e}")
-            if retries % 5 == 0:
-                log.info("Neue Session wird aufgebaut...")
+            if retries % 3 == 0:
+                log.info("Neue Session...")
                 session = make_session()
             time.sleep(60)
         except Exception as e:
             log.error(f"Fehler: {e} – Retry in 60s")
             time.sleep(60)
 
-    # Haupt-Loop
     consecutive_errors = 0
     while True:
         time.sleep(CHECK_INTERVAL)
-
         try:
             current = get_wohnungen(session)
             consecutive_errors = 0
@@ -209,21 +223,19 @@ def main():
             consecutive_errors += 1
             log.warning(f"Abruf: {e}")
             if consecutive_errors >= 3:
-                log.info("Neue Session wird aufgebaut...")
+                log.info("Neue Session...")
                 session = make_session()
                 consecutive_errors = 0
             continue
         except Exception as e:
-            log.warning(f"Abruf fehlgeschlagen: {e}")
+            log.warning(f"Fehler: {e}")
             continue
 
         new_ids = set(current.keys()) - set(known.keys())
-
         if new_ids:
-            log.info(f"NEU: {len(new_ids)} neue Wohnung(en) gefunden!")
+            log.info(f"NEU: {len(new_ids)} neue Wohnung(en)!")
             for oid in new_ids:
-                msg = format_message(current[oid])
-                send_telegram(msg)
+                send_telegram(format_message(current[oid]))
                 log.info(f"  Gemeldet: {oid} – {current[oid]['adresse']}")
         else:
             log.info(f"Keine Neuen. ({len(current)} Wohnungen, {datetime.now().strftime('%H:%M')})")
