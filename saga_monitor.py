@@ -56,26 +56,24 @@ def make_session() -> requests.Session:
         "sec-ch-ua-mobile":          "?0",
         "sec-fetch-dest":            "document",
         "sec-fetch-mode":            "navigate",
-        "sec-fetch-site":            "none",  # erster Besuch = kein Referrer
+        "sec-fetch-site":            "none",
         "upgrade-insecure-requests": "1",
         "cache-control":             "no-cache",
     })
 
-    # Erst Homepage besuchen (wie echter Nutzer)
-    try:
-        r = session.get("https://www.saga.hamburg/", timeout=15)
-        log.info(f"Homepage: {r.status_code}, Cookies: {dict(session.cookies)}")
-        time.sleep(3)
-    except Exception as e:
-        log.warning(f"Homepage-Fehler: {e}")
-
-    # Dann Immobiliensuche-Startseite (ohne Filter)
-    try:
-        r = session.get("https://www.saga.hamburg/immobiliensuche", timeout=15)
-        log.info(f"Immobiliensuche: {r.status_code}, Cookies: {dict(session.cookies)}")
-        time.sleep(2)
-    except Exception as e:
-        log.warning(f"Immobiliensuche-Fehler: {e}")
+    # Mehrere Seiten besuchen wie echter Nutzer
+    pages = [
+        "https://www.saga.hamburg/",
+        "https://www.saga.hamburg/immobiliensuche",
+        "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT",
+    ]
+    for i, page in enumerate(pages):
+        try:
+            r = session.get(page, timeout=15)
+            log.info(f"Seite {i+1}/3: {r.status_code}, Cookies: {dict(session.cookies)}")
+            time.sleep(2 + i)  # 2s, 3s, 4s
+        except Exception as e:
+            log.warning(f"Fehler bei {page}: {e}")
 
     return session
 
