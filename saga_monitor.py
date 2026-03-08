@@ -137,7 +137,7 @@ def get_wohnungen(session: requests.Session) -> dict:
         raise ValueError("Sicherheitspruefung aktiv")
 
     soup = BeautifulSoup(html, "html.parser")
-    cards = soup.find_all("div", id=re.compile(r"^APARTMENT-card-\d+$"))
+    cards = [div for div in soup.find_all("div") if "immo-item" in div.get("class", [])]
 
     if len(cards) == 0:
         # Debug: zeige was die Seite zurückgibt
